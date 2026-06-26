@@ -24,8 +24,9 @@
 	import { Loader2 } from 'lucide-svelte'
 	import { type DynamicInput } from '$lib/utils'
 	import { deepEqual } from 'fast-equals'
-	import { untrack } from 'svelte'
+	import { getContext, untrack } from 'svelte'
 	import { getHelperEntrypointArgs } from '$lib/infer'
+	import { DYNSELECT_ROOT_ARGS_KEY, type DynselectRootArgs } from './dynselectRootArgs'
 
 	interface Props {
 		value?: any
@@ -44,6 +45,15 @@
 		otherArgs: otherArgs,
 		workspace = undefined
 	}: Props = $props()
+
+	// Root run-form args, exposed by the outermost SchemaForm. Lets a dynselect
+	// nested inside a type:object group key its options off top-level fields.
+	// `undefined` when rendered outside a SchemaForm (e.g. apps) → behaves as before.
+	const rootArgsCtx = getContext<DynselectRootArgs | undefined>(DYNSELECT_ROOT_ARGS_KEY)
+	let rootArgs = $derived(rootArgsCtx?.args ?? {})
+	// Own-level args win on key collision, so existing top-level helpers are
+	// unaffected (their otherArgs already carry every sibling).
+	let mergedArgs = $derived({ ...rootArgs, ...otherArgs })
 
 	let [inputType, entrypoint] = $derived(format.includes('-') ? format.split('-', 2) : [format, ''])
 
@@ -100,7 +110,9 @@
 			resultJobLoader?.runDynamicInputScript(
 				entrypoint,
 				helperScript!,
-				{ ...otherArgs, filterText, _ENTRYPOINT_OVERRIDE: entrypoint },
+				// _rootArgs is the namespaced escape hatch for ancestor fields that
+				// collide with a local arg name; absorbed by the helper's **kwargs.
+				{ ...mergedArgs, filterText, _ENTRYPOINT_OVERRIDE: entrypoint, _rootArgs: rootArgs },
 				cb
 			)
 		})
@@ -116,7 +128,8 @@
 				if (filteredValue.length !== value.length) {
 					value = filteredValue
 				}
-			} else if (!isMultiple && value !== undefined) {
+			} else if (!isMultiple && value !== undefined && value !== '') {
+				// '' is the empty default, not a stale selection — leave it.
 				if (!_items.value.find((x) => x.value == value)) {
 					value = undefined
 				}
@@ -171,6 +184,7 @@
 		;[filterText, entrypoint, helperScript]
 		if (
 			resultJobLoader &&
+			entrypoint &&
 			(open || neverLoaded || !deepEqual(filterArgs(lastArgs), filterArgs(nargs)))
 		) {
 			neverLoaded = false
