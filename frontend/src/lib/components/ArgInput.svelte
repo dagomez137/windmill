@@ -1147,6 +1147,7 @@
 									{#if orderEditable}
 										<SchemaFormDnd
 											lightHeaderFont
+											{helperScript}
 											{nestedClasses}
 											{onlyMaskPassword}
 											{disablePortal}
@@ -1183,6 +1184,7 @@
 									{:else}
 										<SchemaForm
 											lightHeaderFont
+											{helperScript}
 											{nestedClasses}
 											{onlyMaskPassword}
 											{disablePortal}
@@ -1269,6 +1271,7 @@
 					{#if orderEditable}
 						<SchemaFormDnd
 							lightHeaderFont
+							{helperScript}
 							{nestedClasses}
 							{onlyMaskPassword}
 							{disablePortal}
@@ -1301,6 +1304,7 @@
 					{:else}
 						<SchemaForm
 							lightHeaderFont
+							{helperScript}
 							{nestedClasses}
 							{onlyMaskPassword}
 							{disablePortal}
