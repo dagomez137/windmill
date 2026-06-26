@@ -14,9 +14,10 @@
 	import { getResourceTypes } from './resourceTypesStore'
 	import { Plus } from 'lucide-svelte'
 	import ArgInput from './ArgInput.svelte'
-	import { createEventDispatcher, untrack } from 'svelte'
+	import { createEventDispatcher, getContext, setContext, untrack } from 'svelte'
 	import { watch } from 'runed'
 	import { deepEqual } from 'fast-equals'
+	import { DYNSELECT_ROOT_ARGS_KEY, type DynselectRootArgs } from './dynselectRootArgs'
 	import {
 		dragHandleZone,
 		SHADOW_ITEM_MARKER_PROPERTY_NAME,
@@ -123,6 +124,17 @@
 	}: Props = $props()
 
 	let ws = $derived(workspace ?? $workspaceStore)
+
+	// Expose this form's args to nested dynselect helpers (DynamicInput). Only the
+	// outermost SchemaForm registers — nested instances inherit the root context, so
+	// a dynselect inside a type:object group still sees the top-level run-form fields.
+	if (!getContext<DynselectRootArgs | undefined>(DYNSELECT_ROOT_ARGS_KEY)) {
+		setContext<DynselectRootArgs>(DYNSELECT_ROOT_ARGS_KEY, {
+			get args() {
+				return args
+			}
+		})
+	}
 
 	const dispatch = createEventDispatcher()
 
