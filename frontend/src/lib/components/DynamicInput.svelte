@@ -75,10 +75,26 @@
 	let filterText: string = $state('')
 	let open: boolean = $state(false)
 
+	// Hard deadline on the helper job. A dynselect answers in a few seconds when
+	// a worker is free; a job sitting in a starved queue would otherwise keep the
+	// promise pending and the field on "Loading..." forever. On expiry the job is
+	// cancelled and the error line shows; reopening the dropdown retries.
+	const JOB_TIMEOUT_MS = 30_000
+
 	async function getItemsFromOptions() {
 		return new Promise<{ label: string; value: any }[]>((resolve, reject) => {
+			let timedOut = false
+			const watchdog = setTimeout(() => {
+				timedOut = true
+				reject(
+					`No result after ${JOB_TIMEOUT_MS / 1000}s (worker busy or helper stalled), ` +
+						'job cancelled. Reopen the dropdown to retry.'
+				)
+				resultJobLoader?.cancelJob()
+			}, JOB_TIMEOUT_MS)
 			let cb: Callbacks = {
 				doneResult({ result }) {
+					clearTimeout(watchdog)
 					if (!result || !Array.isArray(result)) {
 						if (result?.error?.message && result?.error?.name) {
 							reject(
@@ -102,8 +118,12 @@
 					}
 					resolve(result)
 				},
-				cancel: () => reject(),
+				cancel: () => {
+					clearTimeout(watchdog)
+					if (!timedOut) reject()
+				},
 				doneError({ id, error }) {
+					clearTimeout(watchdog)
 					reject(error)
 				}
 			}
@@ -149,6 +169,21 @@
 		}, 1000)
 	})
 
+	// Debounced mirror of filterText: each keystroke used to submit (and cancel)
+	// a fresh helper job; the trigger effect keys on this mirror instead, so one
+	// job per typing burst. The dropdown still narrows instantly client-side
+	// (SelectDropdown filters the loaded items), and the job submission reads
+	// the live filterText, so the eventual result is never staler than the input.
+	let filterTimeout: number | undefined = $state()
+	let nfilterText = $state('')
+	$effect(() => {
+		filterText
+		untrack(() => clearTimeout(filterTimeout))
+		filterTimeout = setTimeout(() => {
+			nfilterText = filterText
+		}, 250)
+	})
+
 	// Parameter names declared by the helper function. When known, we restrict
 	// the change-detection to only those keys so typing in unrelated form fields
 	// no longer retriggers the dynselect job. `undefined` means we couldn't
@@ -181,7 +216,7 @@
 	}
 
 	$effect(() => {
-		;[filterText, entrypoint, helperScript]
+		;[nfilterText, entrypoint, helperScript]
 		if (
 			resultJobLoader &&
 			entrypoint &&
@@ -204,15 +239,18 @@
 				items={safeSelectItems(items || [])}
 				placeholder="Select items"
 				noItemsMsg={_items.status === 'loading' ? 'Loading...' : 'No items found'}
-				disabled={_items.status === 'loading'}
+				disabled={_items.status === 'loading' && !items?.length}
 			/>
 		{:else if inputType === 'dynselect'}
+			<!-- Present as loading only while there is nothing to show yet: a refresh
+			     over an already-loaded list must not disable the field (Select disables
+			     itself on loading with no value), the stale list stays selectable. -->
 			<Select
 				bind:value
 				bind:open
 				{items}
 				bind:filterText
-				loading={!open && _items.status === 'loading'}
+				loading={!open && _items.status === 'loading' && !items?.length}
 				clearable
 				noItemsMsg={_items.status === 'loading' ? 'Loading...' : 'No items found'}
 			/>
