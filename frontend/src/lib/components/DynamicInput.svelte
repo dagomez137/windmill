@@ -142,6 +142,13 @@
 
 	$effect(() => {
 		if (_items.value && value !== undefined && isSelect) {
+			// A filtered fetch returns a subset, not the universe of valid values:
+			// pruning against it drops a legitimate selection, and with a schema
+			// default the prune/re-default cycle between this effect and ArgInput's
+			// computeDefaultValue never converges (each round re-renders the form
+			// and, with the dropdown open, submits another helper job). Prune only
+			// against a complete, settled list.
+			if (filterText || nfilterText || _items.status === 'loading') return
 			if (isMultiple && Array.isArray(value) && Array.isArray(_items.value)) {
 				const availableValues = new Set(_items.value.map((x) => x.value))
 				const filteredValue = value.filter((v) => availableValues.has(v))
@@ -215,14 +222,28 @@
 		return filtered
 	}
 
+	// Refresh on the open edge (closed -> open), on a debounced filter change,
+	// and on a genuine change of the args the helper reads. `open` as a plain
+	// state gate would refresh on every dependency invalidation while the
+	// dropdown is open: any re-render hands down a fresh otherArgs identity, so
+	// a value ping-pong elsewhere in the form submits one helper job per Svelte
+	// flush until the flush guard kills the form.
+	let prevOpen = false
+	let lastFilter = ''
 	$effect(() => {
 		;[nfilterText, entrypoint, helperScript]
+		const justOpened = open && !prevOpen
+		prevOpen = open
 		if (
 			resultJobLoader &&
 			entrypoint &&
-			(open || neverLoaded || !deepEqual(filterArgs(lastArgs), filterArgs(nargs)))
+			(justOpened ||
+				neverLoaded ||
+				nfilterText !== lastFilter ||
+				!deepEqual(filterArgs(lastArgs), filterArgs(nargs)))
 		) {
 			neverLoaded = false
+			lastFilter = nfilterText
 			lastArgs = $state.snapshot(otherArgs)
 			_items.refresh()
 		}
