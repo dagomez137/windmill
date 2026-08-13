@@ -376,8 +376,13 @@
 						</div>
 					{/if}
 					<!-- svelte-ignore a11y_no_static_element_interactions -->
+					<!-- A showExpr-hidden field renders no ArgInput, but this wrapper used
+					     to keep its padding, so a run of hidden siblings (a mode-gated
+					     component's build groups) stacked into a band of blank space. -->
 					<div
-						class="flex flex-row items-center {largeGap ? 'pb-4' : 'pb-2'} "
+						class="{hidden[argName] ? 'hidden' : 'flex'} flex-row items-center {largeGap
+							? 'pb-4'
+							: 'pb-2'} "
 						onclick={() => {
 							dispatch('click', argName)
 						}}
