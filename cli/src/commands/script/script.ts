@@ -1492,6 +1492,211 @@ async function run(
   }
 }
 
+type JobUpdate = {
+  running?: boolean | undefined;
+  completed?: boolean | undefined;
+  new_logs?: string | undefined;
+  log_offset?: number | undefined;
+};
+
+type TrackState = {
+  // Where the next request resumes, as the server last reported it.
+  logOffset: number;
+  // How far the log has been printed without a hole in it.
+  printedThrough: number;
+  // Set once output arrived faster than the stream could carry it.
+  gapped: boolean;
+  running: boolean;
+};
+
+const JOB_POLL_INTERVAL_MS = 500;
+
+/**
+ * Where the next job-update request has to resume from.
+ *
+ * A response carries the slice of the log that ends at `log_offset`, clamped to
+ * the window the server still retains: a request that has fallen behind that
+ * window is moved up to its start, so the chunk that comes back can cover more
+ * ground than its own length. Counting the characters printed loses that
+ * difference and falls further behind on every round, until every request lands
+ * below the window and replays the same tail. Resume from the position the
+ * server reports, and only count when it reports none.
+ */
+export function nextLogOffset(current: number, update: JobUpdate): number {
+  return update.log_offset ?? current + (update.new_logs?.length ?? 0);
+}
+
+/** True when the server dropped the ground between `printedThrough` and a chunk. */
+export function isLogGap(
+  printedThrough: number,
+  chunkLength: number,
+  end: number,
+): boolean {
+  return end - chunkLength > printedThrough;
+}
+
+/** Render one update. True once the job is finished. */
+function applyJobUpdate(state: TrackState, update: JobUpdate): boolean {
+  if (!state.running && update.running === true) {
+    state.running = true;
+    log.info(colors.green("Job running. Streaming logs..."));
+  }
+
+  const chunk = update.new_logs ?? "";
+  const end = nextLogOffset(state.logOffset, update);
+  if (chunk) {
+    process.stdout.write(chunk);
+    if (isLogGap(state.printedThrough, chunk.length, end)) {
+      state.gapped = true;
+    } else {
+      state.printedThrough = end;
+    }
+  }
+  state.logOffset = end;
+
+  if (update.completed === true) {
+    state.running = false;
+    return true;
+  }
+
+  if (state.running && update.running === false) {
+    state.running = false;
+    log.info(colors.yellow("Job suspended. Waiting for it to continue..."));
+  }
+  return false;
+}
+
+/**
+ * Replay what the live stream could not carry, from the stored log.
+ *
+ * The stored copy is the log behind a fixed header, so the header is exactly its
+ * excess over the final offset and the log resumes at the first hole from there.
+ */
+async function printMissedLogs(workspace: string, id: string, state: TrackState) {
+  if (!state.gapped) {
+    return;
+  }
+  const advise = colors.yellow(
+    `\n--- part of this log outran the live stream; \`wmill job logs ${id}\` has all of it ---`,
+  );
+  let full: string;
+  try {
+    full = (await wmill.getJobLogs({ workspace, id })) as unknown as string;
+  } catch {
+    log.info(advise);
+    return;
+  }
+  const header = full.length - state.logOffset;
+  const resume = header + state.printedThrough;
+  if (header < 0 || resume > full.length) {
+    log.info(advise);
+    return;
+  }
+  log.info(
+    colors.yellow("\n--- the rest of the log, which outran the live stream ---"),
+  );
+  process.stdout.write(full.slice(resume));
+}
+
+// One connection is not the whole job: the server ends a stream on its own idle
+// timeout, and `reconnect` asks for a fresh one from the position reached so far.
+type StreamOutcome = "completed" | "reconnect";
+
+async function streamJobOnce(
+  workspace: string,
+  id: string,
+  state: TrackState,
+): Promise<StreamOutcome> {
+  const { OpenAPI } = await import("../../../gen/index.ts");
+  const url =
+    `${OpenAPI.BASE}/w/${workspace}/jobs_u/getupdate_sse/${id}` +
+    `?running=${state.running}&log_offset=${state.logOffset}`;
+  const response = await fetch(url, {
+    headers: {
+      ...getHeaders(),
+      Accept: "text/event-stream",
+      Authorization: `Bearer ${OpenAPI.TOKEN}`,
+    },
+  });
+
+  await detectAuthGatewayChallenge(response, url);
+  if (!response.ok || !response.body) {
+    throw new Error(
+      `job update stream failed: ${response.status} ${response.statusText}`,
+    );
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        return "reconnect";
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) {
+          continue;
+        }
+        const event = JSON.parse(line.slice(6));
+        if (event.type === "ping") {
+          continue;
+        }
+        if (event.type === "timeout") {
+          return "reconnect";
+        }
+        if (event.type === "error" || event.type === "not_found") {
+          throw new Error(event.error ?? `job update stream: ${event.type}`);
+        }
+        if (applyJobUpdate(state, event)) {
+          return "completed";
+        }
+      }
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+}
+
+async function streamJob(workspace: string, id: string, state: TrackState) {
+  while ((await streamJobOnce(workspace, id, state)) === "reconnect") {
+    /* the stream timed out; the next one picks up where it stopped */
+  }
+}
+
+async function pollJob(workspace: string, id: string, state: TrackState) {
+  let retry = 0;
+  while (true) {
+    let updates: JobUpdate;
+    try {
+      updates = await wmill.getJobUpdates({
+        workspace,
+        id,
+        logOffset: state.logOffset,
+        running: state.running,
+      });
+    } catch {
+      retry++;
+      if (retry > 3) {
+        log.info("failed to get job updated. skipping log streaming.");
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, JOB_POLL_INTERVAL_MS));
+      continue;
+    }
+    retry = 0;
+
+    if (applyJobUpdate(state, updates)) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, JOB_POLL_INTERVAL_MS));
+  }
+}
+
 export async function track_job(workspace: string, id: string) {
   try {
     const result = await wmill.getCompletedJob({ workspace, id });
@@ -1507,58 +1712,26 @@ export async function track_job(workspace: string, id: string) {
 
   log.info(colors.yellow("Waiting for Job " + id + " to start..."));
 
-  let logOffset = 0;
-  let running = false;
-  let retry = 0;
-  while (true) {
-    let updates: {
-      running?: boolean | undefined;
-      completed?: boolean | undefined;
-      new_logs?: string | undefined;
-    };
-    try {
-      updates = await wmill.getJobUpdates({
-        workspace,
-        id,
-        logOffset,
-        running,
-      });
-    } catch {
-      retry++;
-      if (retry > 3) {
-        log.info("failed to get job updated. skipping log streaming.");
-        break;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      continue;
-    }
-
-    if (!running && updates.running === true) {
-      running = true;
-      log.info(colors.green("Job running. Streaming logs..."));
-    }
-
-    if (updates.new_logs) {
-      process.stdout.write(updates.new_logs);
-      logOffset += updates.new_logs.length;
-    }
-
-    if (updates.completed === true) {
-      running = false;
-      break;
-    }
-
-    if (running && updates.running === false) {
-      running = false;
-      log.info(colors.yellow("Job suspended. Waiting for it to continue..."));
-    }
+  const state: TrackState = {
+    logOffset: 0,
+    printedThrough: 0,
+    gapped: false,
+    running: false,
+  };
+  try {
+    await streamJob(workspace, id, state);
+  } catch (e) {
+    log.debug(`job update stream unavailable, polling instead: ${e}`);
+    await pollJob(workspace, id, state);
   }
+
   await new Promise((resolve, _) => setTimeout(() => resolve(undefined), 1000));
+  await printMissedLogs(workspace, id, state);
 
   try {
     const final_job = await wmill.getCompletedJob({ workspace, id });
-    if ((final_job.logs?.length ?? -1) > logOffset) {
-      log.info(final_job.logs!.substring(logOffset));
+    if ((final_job.logs?.length ?? -1) > state.logOffset) {
+      log.info(final_job.logs!.substring(state.logOffset));
     }
     log.info("\n");
     if (final_job.success) {
