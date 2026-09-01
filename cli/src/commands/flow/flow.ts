@@ -20,6 +20,7 @@ import {
   validatePath,
 } from "../../core/context.ts";
 import { resolve, track_job, pollForJobResult } from "../script/script.ts";
+import { FLOW_JOB_KINDS } from "../../utils/utils.ts";
 import { defaultFlowDefinition } from "../../../bootstrap/flow_bootstrap.ts";
 import { SyncOptions, mergeConfigWithConfigFile } from "../../core/conf.ts";
 import { FSFSElement, elementsToMap, ignoreF } from "../sync/sync.ts";
@@ -414,6 +415,153 @@ async function get(opts: GlobalOptions & { json?: boolean }, path: string) {
   }
 }
 
+/** Step id to readable label, from a flow job's own definition. */
+async function stepLabels(
+  workspace: string,
+  id: string,
+): Promise<Map<string, string>> {
+  const labels = new Map<string, string>();
+  try {
+    const job = await wmill.getJob({ workspace, id });
+    for (const mod of (job as any).raw_flow?.modules ?? []) {
+      if (mod.id) {
+        labels.set(mod.id, mod.summary ? `${mod.id}: ${mod.summary}` : mod.id);
+      }
+    }
+  } catch {
+    // Best-effort — fall back to module ids
+  }
+  return labels;
+}
+
+/**
+ * Stream one step, descending if it turns out to be a flow of its own.
+ *
+ * The child's own kind decides, not the parent module's type: a single-step
+ * loop body is optimized into a plain script job rather than a flow node.
+ */
+async function trackStep(
+  workspace: string,
+  id: string,
+  label: string,
+  silent: boolean,
+): Promise<void> {
+  let kind: string | undefined;
+  try {
+    kind = (await wmill.getJob({ workspace, id })).job_kind as string;
+  } catch {
+    // Unreadable kind: treat it as a leaf and stream whatever it has.
+  }
+
+  if (kind !== undefined && FLOW_JOB_KINDS.has(kind)) {
+    await trackFlowSteps(workspace, id, label, silent);
+    return;
+  }
+  if (!silent) {
+    log.info("====== " + label + " ======");
+    await track_job(workspace, id);
+  }
+}
+
+/** Walk a flow job's steps in order, streaming each as it starts. */
+async function trackFlowSteps(
+  workspace: string,
+  id: string,
+  prefix: string,
+  silent: boolean,
+): Promise<void> {
+  const labels = await stepLabels(workspace, id);
+  const name = (stepId: string | undefined, fallback: string) => {
+    const own = (stepId && labels.get(stepId)) || fallback;
+    return prefix ? `${prefix} > ${own}` : own;
+  };
+
+  let i = 0;
+  let lastStatus = "";
+  while (true) {
+    const jobInfo = await wmill.getJob({ workspace, id });
+
+    // Check if flow has completed (success or failure)
+    const isCompleted = (jobInfo as any).type === "CompletedJob";
+    const flowStatus = jobInfo.flow_status!;
+
+    if (flowStatus.modules.length <= i) {
+      break;
+    }
+    const module = flowStatus.modules[i];
+
+    // If a module has failed, track its job (to show error logs), then break
+    if (module.type === "Failure") {
+      if (module.job) {
+        await trackStep(
+          workspace,
+          module.job,
+          name(module.id, `Step ${i + 1}`),
+          silent,
+        );
+      }
+      break;
+    }
+
+    if (module.job) {
+      const label = name(module.id, `Step ${i + 1}`);
+      const isForLoop = (module as any).flow_jobs !== undefined;
+
+      if (isForLoop) {
+        // For-loop: track iterations as they appear, re-polling until module completes
+        let trackedIterations = 0;
+        let forLoopFailed = false;
+        while (true) {
+          const refreshed = await wmill.getJob({ workspace, id });
+          const refreshedModule = refreshed.flow_status!.modules[i];
+          const flowJobs =
+            ((refreshedModule as any).flow_jobs as string[] | undefined) ?? [];
+
+          // Track any new iterations
+          while (trackedIterations < flowJobs.length) {
+            await trackStep(
+              workspace,
+              flowJobs[trackedIterations],
+              `${label} (iteration ${trackedIterations})`,
+              silent,
+            );
+            trackedIterations++;
+          }
+
+          if (
+            refreshedModule.type === "Success" ||
+            refreshedModule.type === "Failure"
+          ) {
+            forLoopFailed = refreshedModule.type === "Failure";
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 200));
+        }
+        if (forLoopFailed) break;
+      } else {
+        await trackStep(workspace, module.job, label, silent);
+      }
+    } else {
+      // Module not started yet — deduplicate status messages
+      const status = String(module.type);
+      if (!silent && status !== lastStatus) {
+        log.info(colors.dim(status));
+        lastStatus = status;
+      }
+      await new Promise((resolve, _) =>
+        setTimeout(() => resolve(undefined), 100)
+      );
+
+      // If flow already completed while we were waiting, break out
+      if (isCompleted) break;
+
+      continue;
+    }
+    lastStatus = "";
+    i++;
+  }
+}
+
 async function run(
   opts: GlobalOptions & {
     data?: string;
@@ -451,110 +599,7 @@ async function run(
     requestBody: input,
   });
 
-  // Build step label map from raw_flow if available
-  const stepLabels = new Map<string, string>();
-  try {
-    const initialJob = await wmill.getJob({
-      workspace: workspace.workspaceId,
-      id,
-    });
-    const rawFlow = (initialJob as any).raw_flow;
-    if (rawFlow?.modules) {
-      for (const mod of rawFlow.modules) {
-        if (mod.id) {
-          const label = mod.summary ? `${mod.id}: ${mod.summary}` : mod.id;
-          stepLabels.set(mod.id, label);
-        }
-      }
-    }
-  } catch {
-    // Best-effort — fall back to module IDs
-  }
-
-  let i = 0;
-  let lastStatus = "";
-  while (true) {
-    const jobInfo = await wmill.getJob({
-      workspace: workspace.workspaceId,
-      id,
-    });
-
-    // Check if flow has completed (success or failure)
-    const isCompleted = (jobInfo as any).type === "CompletedJob";
-    const flowStatus = jobInfo.flow_status!;
-
-    if (flowStatus.modules.length <= i) {
-      break;
-    }
-    const module = flowStatus.modules[i];
-
-    // If a module has failed, track its job (to show error logs), then break
-    if (module.type === "Failure") {
-      if (module.job && !opts.silent) {
-        const label = stepLabels.get(module.id!) ?? `Step ${i + 1}`;
-        log.info("====== " + label + " ======");
-        await track_job(workspace.workspaceId, module.job);
-      }
-      break;
-    }
-
-    if (module.job) {
-      const label = stepLabels.get(module.id!) ?? `Step ${i + 1}`;
-      const isForLoop = (module as any).flow_jobs !== undefined;
-
-      if (isForLoop) {
-        // For-loop: track iterations as they appear, re-polling until module completes
-        let trackedIterations = 0;
-        let forLoopFailed = false;
-        while (true) {
-          const refreshed = await wmill.getJob({
-            workspace: workspace.workspaceId,
-            id,
-          });
-          const refreshedModule = refreshed.flow_status!.modules[i];
-          const flowJobs = ((refreshedModule as any).flow_jobs as string[] | undefined) ?? [];
-
-          // Track any new iterations
-          while (trackedIterations < flowJobs.length) {
-            if (!opts.silent) {
-              log.info(`====== ${label} (iteration ${trackedIterations}) ======`);
-              await track_job(workspace.workspaceId, flowJobs[trackedIterations]);
-            }
-            trackedIterations++;
-          }
-
-          if (refreshedModule.type === "Success" || refreshedModule.type === "Failure") {
-            forLoopFailed = refreshedModule.type === "Failure";
-            break;
-          }
-          await new Promise((resolve) => setTimeout(resolve, 200));
-        }
-        if (forLoopFailed) break;
-      } else {
-        if (!opts.silent) {
-          log.info("====== " + label + " ======");
-          await track_job(workspace.workspaceId, module.job);
-        }
-      }
-    } else {
-      // Module not started yet — deduplicate status messages
-      const status = String(module.type);
-      if (!opts.silent && status !== lastStatus) {
-        log.info(colors.dim(status));
-        lastStatus = status;
-      }
-      await new Promise((resolve, _) =>
-        setTimeout(() => resolve(undefined), 100)
-      );
-
-      // If flow already completed while we were waiting, break out
-      if (isCompleted) break;
-
-      continue;
-    }
-    lastStatus = "";
-    i++;
-  }
+  await trackFlowSteps(workspace.workspaceId, id, "", opts.silent ?? false);
 
   // Wait for flow completion with retry (handles race when --silent skips module tracking)
   const MAX_RETRIES = 600; // ~60 seconds at 100ms intervals

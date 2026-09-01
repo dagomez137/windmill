@@ -369,3 +369,14 @@ export function validateRequiredArgs(
     );
   }
 }
+
+// A flow-kind job runs none of the user's own code: the worker writes it a
+// single completion line and the steps live in child jobs. Descending past one
+// is what makes a branch, a loop iteration or a subflow show its work at all.
+export const FLOW_JOB_KINDS = new Set([
+  "flow",
+  "flowpreview",
+  "flownode",
+  "singlestepflow",
+  "aiagent",
+]);
