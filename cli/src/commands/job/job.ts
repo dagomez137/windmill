@@ -7,7 +7,7 @@ import { colors } from "@cliffy/ansi/colors";
 import * as log from "../../core/log.ts";
 import { mergeConfigWithConfigFile } from "../../core/conf.ts";
 import * as wmill from "../../../gen/services.gen.ts";
-import { formatTimestamp } from "../../utils/utils.ts";
+import { FLOW_JOB_KINDS, formatTimestamp } from "../../utils/utils.ts";
 
 function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
@@ -276,63 +276,31 @@ async function logs(
   const workspace = await resolveWorkspace(opts);
   await requireLogin(opts);
 
-  // Check if this is a flow job — if so, aggregate all step logs
+  // A flow's steps are separate jobs, and a branch, loop iteration or subflow
+  // is itself a flow whose own log is one completion line. Ask the server for
+  // the whole tree: it recurses over parentage and returns every descendant in
+  // depth-first order, including retry attempts, which walking the top-level
+  // modules alone cannot reach.
   try {
-    const job = await wmill.getJob({
-      workspace: workspace.workspaceId,
-      id,
-    });
-    const j = job as any;
-    const jobKind = j.job_kind;
-    if ((jobKind === "flow" || jobKind === "flowpreview") && j.flow_status?.modules) {
-      const modules = j.flow_status.modules;
-      const rawModules = j.raw_flow?.modules ?? [];
-      const summaryMap = new Map<string, string>();
-      for (const mod of rawModules) {
-        if (mod.id && mod.summary) summaryMap.set(mod.id, mod.summary);
-      }
-
-      // Strip the "to remove ansi colors" hint that appears in each step's logs
-      const stripHint = (text: string) =>
-        text.replace(/^to remove ansi colors.*\n?/gm, "");
-
+    const job = await wmill.getJob({ workspace: workspace.workspaceId, id });
+    if (FLOW_JOB_KINDS.has((job as any).job_kind)) {
+      const entries = await wmill.getFlowAllLogsStructured({
+        workspace: workspace.workspaceId,
+        id,
+      });
       let hasLogs = false;
-      for (const mod of modules) {
-        const summary = summaryMap.get(mod.id) ?? "";
-        const label = summary ? `${mod.id}: ${summary}` : mod.id;
-
-        // For-loop modules: get logs for each iteration
-        const flowJobs = mod.flow_jobs as string[] | undefined;
-        if (flowJobs && flowJobs.length > 0) {
-          for (let iter = 0; iter < flowJobs.length; iter++) {
-            try {
-              const stepLogs = await wmill.getJobLogs({
-                workspace: workspace.workspaceId,
-                id: flowJobs[iter],
-              });
-              if (stepLogs) {
-                console.log(colors.bold.cyan(`\n====== ${label} (iteration ${iter}) ======`));
-                console.log(stripHint(stepLogs));
-                hasLogs = true;
-              }
-            } catch { /* step may not exist yet */ }
-          }
-        } else if (mod.job) {
-          // Regular step
-          try {
-            const stepLogs = await wmill.getJobLogs({
-              workspace: workspace.workspaceId,
-              id: mod.job,
-            });
-            if (stepLogs) {
-              console.log(colors.bold.cyan(`\n====== ${label} ======`));
-              console.log(stripHint(stepLogs));
-              hasLogs = true;
-            }
-          } catch { /* step may not exist yet */ }
+      for (const entry of entries) {
+        const text = (entry.logs ?? "").replace(
+          /^to remove ansi colors.*\n?/gm,
+          "",
+        );
+        if (!text.trim()) {
+          continue;
         }
+        log.info(colors.bold.cyan(`\n====== ${entry.label} ======`));
+        log.info(text);
+        hasLogs = true;
       }
-
       if (!hasLogs) {
         log.info("No logs available for this flow's steps.");
       }
