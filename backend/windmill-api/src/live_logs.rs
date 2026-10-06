@@ -110,13 +110,20 @@ struct JobInfo {
     step: Option<String>,
     path: Option<String>,
     kind: String,
+    worker: Option<String>,
+    hostname: Option<String>,
 }
 
 async fn job_info(db: &DB, w_id: &str, job_id: Uuid) -> error::Result<JobInfo> {
     let row = sqlx::query(
-        "SELECT parent_job, COALESCE(root_job, flow_innermost_root_job, parent_job, id) AS root, \
-         flow_step_id, runnable_path, kind::text AS kind \
-         FROM v2_job WHERE id = $1 AND workspace_id = $2",
+        "SELECT j.parent_job, COALESCE(j.root_job, j.flow_innermost_root_job, j.parent_job, j.id) AS root, \
+         j.flow_step_id, j.runnable_path, j.kind::text AS kind, \
+         COALESCE(q.worker, c.worker) AS worker, w.worker_instance AS hostname \
+         FROM v2_job j \
+         LEFT JOIN v2_job_queue q ON q.id = j.id \
+         LEFT JOIN v2_job_completed c ON c.id = j.id \
+         LEFT JOIN worker_ping w ON w.worker = COALESCE(q.worker, c.worker) \
+         WHERE j.id = $1 AND j.workspace_id = $2",
     )
     .bind(job_id)
     .bind(w_id)
@@ -129,6 +136,8 @@ async fn job_info(db: &DB, w_id: &str, job_id: Uuid) -> error::Result<JobInfo> {
         step: row.try_get("flow_step_id")?,
         path: row.try_get("runnable_path")?,
         kind: row.try_get("kind")?,
+        worker: row.try_get("worker")?,
+        hostname: row.try_get("hostname")?,
     })
 }
 
@@ -159,6 +168,8 @@ pub async fn publish_stream(
             step: info.step,
             path: info.path,
             kind: info.kind,
+            worker: info.worker,
+            hostname: info.hostname,
         },
         None,
     );

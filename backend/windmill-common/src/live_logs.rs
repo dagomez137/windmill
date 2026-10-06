@@ -39,6 +39,9 @@ pub enum LiveEvent {
         step: Option<String>,
         path: Option<String>,
         kind: String,
+        /// The worker running the job, and the host it runs on.
+        worker: Option<String>,
+        hostname: Option<String>,
     },
     Log {
         job: Uuid,
