@@ -21,6 +21,7 @@ import {
 } from "../../core/context.ts";
 import { resolve, track_job, pollForJobResult } from "../script/script.ts";
 import { FLOW_JOB_KINDS } from "../../utils/utils.ts";
+import { viewFlowRun } from "../../utils/flow_view.ts";
 import { defaultFlowDefinition } from "../../../bootstrap/flow_bootstrap.ts";
 import {
   SyncOptions,
@@ -603,6 +604,8 @@ async function run(
     data?: string;
     silent: boolean;
     tag?: string;
+    follow?: boolean;
+    view?: boolean;
   },
   path: string
 ) {
@@ -634,6 +637,22 @@ async function run(
     tag: opts.tag,
     requestBody: input,
   });
+
+  if (!opts.silent && opts.view !== false) {
+    const viewed = await viewFlowRun(workspace.workspaceId, id, {
+      path,
+      follow: opts.follow ?? false,
+      interactive: process.stdout.isTTY === true,
+    });
+    if (viewed !== undefined) {
+      if (!viewed.success) {
+        process.exitCode = 1;
+      }
+      log.info(JSON.stringify(viewed.result ?? {}, null, 2));
+      return;
+    }
+    log.debug("no live flow events; following the steps one by one instead");
+  }
 
   await trackFlowSteps(workspace.workspaceId, id, "", opts.silent ?? false);
 
@@ -1234,6 +1253,14 @@ const command = new Command()
   .option(
     "--tag <tag:string>",
     "Override the worker tag the run is dispatched to (e.g. to route it to dev workers instead of the flow's default tag)."
+  )
+  .option(
+    "--follow",
+    "Stream every step's output above the progress footer (toggle with `l` while running)."
+  )
+  .option(
+    "--no-view",
+    "Print each step's whole output in turn instead of the progress view."
   )
   .action(run as any)
   .command(

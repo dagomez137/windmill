@@ -16,6 +16,8 @@ export type LiveEvent =
     step?: string | null;
     path?: string | null;
     kind: string;
+    worker?: string | null;
+    hostname?: string | null;
   }
   | { type: "log"; job: string; offset: number; text: string }
   | { type: "gap"; job: string }
