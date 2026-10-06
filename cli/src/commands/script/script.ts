@@ -1782,6 +1782,9 @@ async function trackLive(workspace: string, id: string): Promise<boolean> {
       } else if (u?.running && !started) {
         runningSince ??= Date.now();
         if (Date.now() - runningSince > LIVE_START_GRACE_MS) {
+          log.debug(
+            `no live output for job ${id} after ${LIVE_START_GRACE_MS} ms running; using the update stream`,
+          );
           fallback = true;
           abort.abort();
         }

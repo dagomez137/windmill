@@ -19,6 +19,8 @@ export type LiveEvent =
   }
   | { type: "log"; job: string; offset: number; text: string }
   | { type: "gap"; job: string }
+  | { type: "progress"; job: string; percent: number }
+  | { type: "flow_changed"; flow: string }
   | { type: "end"; job: string; success: boolean | null }
   | { type: "lagged" };
 
