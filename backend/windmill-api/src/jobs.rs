@@ -451,6 +451,8 @@ pub fn workspace_unauthed_service() -> Router {
         .route("/dispatch_events/{id}", get(get_dispatch_events))
         .route("/getupdate/{id}", get(get_job_update))
         .route("/getupdate_sse/{id}", get(get_job_update_sse))
+        .route("/live/{id}", get(crate::live_logs::subscribe))
+        .route("/live/{id}/publish", post(crate::live_logs::publish_stream))
         .route("/get_log_file/{*file_path}", get(get_log_file))
         .route("/queue/cancel/{id}", post(cancel_job_api))
         .route(
@@ -2230,7 +2232,7 @@ fn job_read_access_cache_key(authed: &ApiAuthed, w_id: &str, job_id: &Uuid) -> [
 
 /// [`require_job_read_access`] for callers (job-update poll / SSE) that haven't
 /// already loaded `created_by` — fetches it (root DB, by id+workspace) first.
-async fn require_job_update_read_access(
+pub(crate) async fn require_job_update_read_access(
     db: &DB,
     user_db: &UserDB,
     authed: &ApiAuthed,

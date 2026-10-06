@@ -3873,6 +3873,16 @@ pub async fn run_worker(
                         token,
                         None,
                     );
+                    // A flow job only advances its state machine here; its steps publish.
+                    let live_guard = (!is_flow)
+                        .then(|| {
+                            crate::live_publish::register(
+                                job.id,
+                                &job.workspace_id,
+                                &authed_client.token,
+                            )
+                        })
+                        .flatten();
 
                     let arc_job = Arc::new(job);
 
@@ -3912,6 +3922,10 @@ pub async fn run_worker(
                         .instrument(span),
                     )
                     .await;
+
+                    if let Some(guard) = live_guard {
+                        guard.finish(matches!(job_result, Ok(ref o) if o.is_success()));
+                    }
 
                     // A result served from the cache went through the loop without running
                     // anything here.

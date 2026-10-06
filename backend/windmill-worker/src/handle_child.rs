@@ -54,6 +54,7 @@ use crate::job_logger::{append_job_logs, append_result_stream, append_with_limit
 use crate::job_logger_oss::process_streaming_log_lines;
 use crate::worker_utils::{ping_job_status, update_worker_ping_from_job};
 use crate::{MAX_RESULT_SIZE, MAX_WAIT_FOR_SIGINT, MAX_WAIT_FOR_SIGTERM};
+use windmill_common::live_logs::PublishFrame;
 
 use windmill_common::tracing_init::{OTEL_JOB_LOGS, OTEL_PREFIX, QUIET_MODE, VERBOSE_TARGET};
 
@@ -417,6 +418,12 @@ async fn write_lines(
 
     let is_stream = Arc::new(AtomicBool::new(false));
     let offset = Arc::new(AtomicI32::new(0));
+    let mut live = match crate::live_publish::publisher(job_id) {
+        Some(p) if pipe_stdout.is_none() => crate::live_publish::log_end_offset(conn, job_id)
+            .await
+            .map(|o| (p, o)),
+        _ => None,
+    };
     while let Some(line) = output.by_ref().next().await {
         let do_write_ = do_write.shared();
 
@@ -502,7 +509,18 @@ async fn write_lines(
                                 buf.push_str(&strip_nul(&line));
                             }
                         }
+                        let before = joined.len();
                         append_with_limit(&mut joined, logged, &mut log_remaining);
+                        if let Some((p, live_offset)) = live.as_mut() {
+                            let text = &joined[before..];
+                            if !text.is_empty() {
+                                p.send(PublishFrame::Log {
+                                    offset: *live_offset,
+                                    text: text.to_string(),
+                                });
+                                *live_offset += text.chars().count() as i64;
+                            }
+                        }
                     }
                     if log_remaining == 0 {
                         tracing::info!(%job_id, "Too many logs lines for job {job_id}");

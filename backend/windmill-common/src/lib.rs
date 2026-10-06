@@ -79,6 +79,7 @@ pub mod guest_jwt;
 pub mod indexer;
 pub mod instance_config;
 pub mod job_metrics;
+pub mod live_logs;
 pub mod log_context;
 pub mod materialization;
 pub mod min_version;

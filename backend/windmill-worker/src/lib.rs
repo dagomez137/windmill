@@ -56,6 +56,7 @@ pub mod job_logger;
 pub mod job_logger_ee;
 mod job_logger_oss;
 mod js_eval;
+pub mod live_publish;
 pub mod memory_common;
 #[cfg(feature = "private")]
 pub mod memory_ee;
