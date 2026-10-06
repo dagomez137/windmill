@@ -453,6 +453,7 @@ pub fn workspace_unauthed_service() -> Router {
         .route("/getupdate_sse/{id}", get(get_job_update_sse))
         .route("/live/{id}", get(crate::live_logs::subscribe))
         .route("/live/{id}/publish", post(crate::live_logs::publish_stream))
+        .route("/live/{id}/changed", post(crate::live_logs::flow_changed))
         .route("/get_log_file/{*file_path}", get(get_log_file))
         .route("/queue/cancel/{id}", post(cancel_job_api))
         .route(

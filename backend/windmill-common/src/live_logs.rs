@@ -19,6 +19,10 @@ pub enum PublishFrame {
     },
     /// The worker dropped frames since the previous one.
     Gap,
+    /// `wmill.set_progress`, as a percentage.
+    Progress {
+        percent: i32,
+    },
     End {
         success: bool,
     },
@@ -44,6 +48,15 @@ pub enum LiveEvent {
     Gap {
         job: Uuid,
     },
+    Progress {
+        job: Uuid,
+        percent: i32,
+    },
+    /// The status of `flow` (a flow or subflow under the subscribed root) changed:
+    /// a step was queued, skipped or completed, or the flow itself finished.
+    FlowChanged {
+        flow: Uuid,
+    },
     /// `success` is `None` when the publisher went away without reporting one.
     End {
         job: Uuid,
@@ -59,8 +72,9 @@ impl LiveEvent {
             LiveEvent::Start { job, .. }
             | LiveEvent::Log { job, .. }
             | LiveEvent::Gap { job }
+            | LiveEvent::Progress { job, .. }
             | LiveEvent::End { job, .. } => Some(*job),
-            LiveEvent::Lagged => None,
+            LiveEvent::FlowChanged { .. } | LiveEvent::Lagged => None,
         }
     }
 
@@ -69,5 +83,21 @@ impl LiveEvent {
             LiveEvent::Log { text, .. } => text.len() + 64,
             _ => 128,
         }
+    }
+}
+
+type Sink = Box<dyn Fn(Uuid, PublishFrame) + Send + Sync>;
+
+static SINK: std::sync::OnceLock<Sink> = std::sync::OnceLock::new();
+
+/// Lets code that only knows a job id (the embedded API server a script calls)
+/// reach the job's live stream, which the worker owns.
+pub fn set_sink(sink: Sink) {
+    let _ = SINK.set(sink);
+}
+
+pub fn emit(job: Uuid, frame: PublishFrame) {
+    if let Some(sink) = SINK.get() {
+        sink(job, frame);
     }
 }

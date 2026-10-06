@@ -261,6 +261,10 @@ async fn set_job_progress(
             return Err(err);
         }
     };
+    windmill_common::live_logs::emit(
+        job_id,
+        windmill_common::live_logs::PublishFrame::Progress { percent },
+    );
     return Ok(Json(()));
 }
 

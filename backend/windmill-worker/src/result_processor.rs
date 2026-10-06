@@ -498,6 +498,10 @@ pub fn start_background_processor(
                     {
                         tracing::error!("Error updating flow status after job completion for {flow} on {worker_name}: {e:#}");
                     }
+                    crate::live_publish::flow_changed(
+                        &AuthedClient::new(String::new(), w_id.clone(), token.clone(), None),
+                        flow,
+                    );
                     #[cfg(feature = "benchmark")]
                     {
                         if infos.add_iter(bench, flow, true) {
@@ -1849,6 +1853,7 @@ pub async fn process_completed_job(
                 )
                 .warn_after_seconds(10)
                 .await?;
+                crate::live_publish::flow_changed(client, parent_job);
                 add_time!(bench, "updated flow status END");
                 if let Some(done_tx) = done_tx {
                     done_tx
@@ -1946,6 +1951,7 @@ pub async fn process_completed_job(
                 )
                 .warn_after_seconds(10)
                 .await?;
+                crate::live_publish::flow_changed(client, parent_job);
                 if let Some(done_tx) = done_tx {
                     done_tx
                         .send(())
@@ -2057,6 +2063,7 @@ pub async fn handle_job_error(
             bench,
         )
         .await;
+        crate::live_publish::flow_changed(client, flow);
 
         if let Err(err) = updated_flow {
             if let Some(parent_job_id) = job.parent_job {

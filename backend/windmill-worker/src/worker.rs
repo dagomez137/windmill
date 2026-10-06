@@ -3926,6 +3926,9 @@ pub async fn run_worker(
                     if let Some(guard) = live_guard {
                         guard.finish(matches!(job_result, Ok(ref o) if o.is_success()));
                     }
+                    if is_flow {
+                        crate::live_publish::flow_changed(&authed_client, job_id);
+                    }
 
                     // A result served from the cache went through the loop without running
                     // anything here.

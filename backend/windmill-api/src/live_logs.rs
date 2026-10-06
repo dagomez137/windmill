@@ -176,6 +176,9 @@ pub async fn publish_stream(
                     LiveEvent::Log { job: job_id, offset, text }
                 }
                 Ok(PublishFrame::Gap) => LiveEvent::Gap { job: job_id },
+                Ok(PublishFrame::Progress { percent }) => {
+                    LiveEvent::Progress { job: job_id, percent }
+                }
                 Ok(PublishFrame::End { success }) => {
                     ended = true;
                     LiveEvent::End { job: job_id, success: Some(success) }
@@ -195,6 +198,43 @@ pub async fn publish_stream(
             Some(job_id),
         );
     }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn root_of(db: &DB, w_id: &str, job_id: Uuid) -> error::Result<Option<Uuid>> {
+    Ok(sqlx::query_scalar::<_, Uuid>(
+        "SELECT COALESCE(root_job, flow_innermost_root_job, parent_job, id) \
+         FROM v2_job WHERE id = $1 AND workspace_id = $2",
+    )
+    .bind(job_id)
+    .bind(w_id)
+    .fetch_optional(db)
+    .await?)
+}
+
+/// `POST /w/{w}/jobs_u/live/{flow}/changed`: a worker reports that `flow`'s status
+/// moved, with the token of any job under the same root.
+pub async fn flow_changed(
+    authed: ApiAuthed,
+    Extension(db): Extension<DB>,
+    Path((w_id, flow)): Path<(String, Uuid)>,
+) -> error::Result<StatusCode> {
+    let token_job = authed.job_id.ok_or_else(|| {
+        Error::NotAuthorized("flow changes are reported with a job token".to_string())
+    })?;
+    let root = root_of(&db, &w_id, flow)
+        .await?
+        .ok_or_else(|| Error::NotFound(format!("job {flow} not found")))?;
+    if root_of(&db, &w_id, token_job).await? != Some(root) {
+        return Err(Error::NotAuthorized(format!(
+            "job {token_job} is not under the root of {flow}"
+        )));
+    }
+    let mut targets = vec![root];
+    if flow != root {
+        targets.push(flow);
+    }
+    publish(&targets, LiveEvent::FlowChanged { flow }, None);
     Ok(StatusCode::NO_CONTENT)
 }
 

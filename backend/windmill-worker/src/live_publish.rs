@@ -9,6 +9,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use futures::StreamExt;
 use tokio::sync::mpsc;
 use uuid::Uuid;
+use windmill_common::client::AuthedClient;
 use windmill_common::live_logs::PublishFrame;
 use windmill_common::utils::HTTP_CLIENT_STREAMING;
 use windmill_common::worker::Connection;
@@ -76,6 +77,11 @@ impl Drop for LiveGuard {
 
 pub fn register(job_id: Uuid, w_id: &str, token: &str) -> Option<LiveGuard> {
     let base = LIVE_LOGS_URL.as_ref()?;
+    windmill_common::live_logs::set_sink(Box::new(|job, frame| {
+        if let Some(p) = publisher(&job) {
+            p.send(frame);
+        }
+    }));
     if job_id.is_nil() || token.is_empty() {
         return None;
     }
@@ -123,4 +129,31 @@ pub async fn log_end_offset(conn: &Connection, job_id: &Uuid) -> Option<i64> {
     .map(|o| o.unwrap_or(0))
     .map_err(|e| tracing::warn!(%job_id, %e, "live log offset read failed"))
     .ok()
+}
+
+/// Tell subscribers of `flow`'s root that its status changed, so they reread it
+/// instead of polling. Sent with the token of a job under the same root.
+pub fn flow_changed(client: &AuthedClient, flow: Uuid) {
+    let Some(base) = LIVE_LOGS_URL.as_ref() else {
+        return;
+    };
+    if flow.is_nil() || client.token.is_empty() {
+        return;
+    }
+    let url = format!(
+        "{base}/api/w/{}/jobs_u/live/{flow}/changed",
+        client.workspace
+    );
+    let token = client.token.clone();
+    tokio::spawn(async move {
+        if let Err(e) = HTTP_CLIENT_STREAMING
+            .post(&url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .and_then(|r| r.error_for_status())
+        {
+            tracing::debug!(%flow, %e, "live flow change not sent");
+        }
+    });
 }
