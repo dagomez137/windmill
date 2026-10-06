@@ -21,6 +21,7 @@ import * as path from "node:path";
 import { stringify as yamlStringify } from "yaml";
 import { deepEqual, getHeaders, isFileResource, isFilesetResource, readTextFile, readTextFileSync } from "../../utils/utils.ts";
 import { detectAuthGatewayChallenge } from "../../utils/http_guards.ts";
+import { LogPrinter, liveEvents } from "../../utils/live_logs.ts";
 import * as wmill from "../../../gen/services.gen.ts";
 import * as specificItems from "../../core/specific_items.ts";
 import { getCurrentGitBranch } from "../../utils/git.ts";
@@ -1747,6 +1748,86 @@ async function pollJob(workspace: string, id: string, state: TrackState) {
   }
 }
 
+// How long a running job may go without a live `start` before the worker is taken
+// to have no live publisher, and the job update stream is used instead.
+const LIVE_START_GRACE_MS = 3000;
+
+/**
+ * Stream a job's log from the live hub. False, with nothing printed, when the
+ * server or the job's worker does not publish live output.
+ */
+async function trackLive(workspace: string, id: string): Promise<boolean> {
+  const abort = new AbortController();
+  const printer = new LogPrinter(
+    (s) => process.stdout.write(s),
+    async () =>
+      (await wmill.getJobLogs({
+        workspace,
+        id,
+        removeAnsiWarnings: true,
+      })) as unknown as string,
+  );
+  let started = false;
+  let fallback = false;
+
+  const watchdog = (async () => {
+    let runningSince: number | undefined;
+    while (!abort.signal.aborted) {
+      await new Promise((r) => setTimeout(r, 1000));
+      const u = await wmill
+        .getJobUpdates({ workspace, id, running: false, noLogs: true })
+        .catch(() => undefined);
+      if (u?.completed) {
+        abort.abort();
+      } else if (u?.running && !started) {
+        runningSince ??= Date.now();
+        if (Date.now() - runningSince > LIVE_START_GRACE_MS) {
+          fallback = true;
+          abort.abort();
+        }
+      }
+    }
+  })();
+
+  try {
+    for await (const ev of liveEvents(workspace, id, abort.signal)) {
+      if (ev.type === "start" && !started) {
+        started = true;
+        log.info(colors.green("Job running. Streaming logs..."));
+      } else if (ev.type === "log") {
+        await printer.chunk(ev.offset, ev.text);
+      } else if (ev.type === "end") {
+        break;
+      }
+    }
+  } catch (e) {
+    if (!abort.signal.aborted) {
+      log.debug(`live output unavailable: ${e}`);
+      fallback = !started;
+    }
+  } finally {
+    abort.abort();
+    await watchdog;
+  }
+  if (fallback && printer.printed === 0) {
+    return false;
+  }
+
+  // Lines appended after the step's own output (the result, a failure) land with
+  // the completion, so wait for it before reading the rest of the stored log.
+  for (let i = 0; i < 100; i++) {
+    const u = await wmill
+      .getJobUpdates({ workspace, id, running: false, noLogs: true })
+      .catch(() => undefined);
+    if (u?.completed) {
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  await printer.backfill();
+  return true;
+}
+
 export async function track_job(workspace: string, id: string) {
   try {
     const result = await wmill.getCompletedJob({ workspace, id });
@@ -1761,6 +1842,11 @@ export async function track_job(workspace: string, id: string) {
   }
 
   log.info(colors.yellow("Waiting for Job " + id + " to start..."));
+
+  if (await trackLive(workspace, id)) {
+    await printCompletion(workspace, id);
+    return;
+  }
 
   const state: TrackState = {
     logOffset: 0,
@@ -1785,12 +1871,26 @@ export async function track_job(workspace: string, id: string) {
       log.info(final_job.logs!.substring(state.logOffset));
     }
     log.info("\n");
-    if (final_job.success) {
-      log.info(colors.bold.underline.green("Job Completed"));
-    } else {
-      log.info(colors.bold.underline.red("Job Completed"));
-    }
+    printCompletedStatus(final_job.success);
+  } catch {
+    log.info("Job appears to have completed, but no data can be retrieved");
+  }
+}
+
+function printCompletedStatus(success: boolean | undefined) {
+  if (success) {
+    log.info(colors.bold.underline.green("Job Completed"));
+  } else {
+    log.info(colors.bold.underline.red("Job Completed"));
+  }
+  log.info("\n");
+}
+
+async function printCompletion(workspace: string, id: string) {
+  try {
+    const final_job = await wmill.getCompletedJob({ workspace, id });
     log.info("\n");
+    printCompletedStatus(final_job.success);
   } catch {
     log.info("Job appears to have completed, but no data can be retrieved");
   }
