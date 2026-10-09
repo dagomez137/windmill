@@ -299,6 +299,59 @@ function where(s: Step): string {
   return s.hostname ? `${s.worker} @ ${s.hostname}` : s.worker;
 }
 
+const MARK: Partial<Record<StepStatus, [string, (s: string) => string]>> = {
+  ok: ["✓", colors.green],
+  failed: ["✗", colors.red],
+  retried: ["▓", colors.yellow],
+  running: ["▸", colors.cyan],
+  skipped: ["⊘", colors.dim],
+};
+
+/**
+ * Every step of the run, in start order and under the subflow that ran it,
+ * with the job ids `wmill job logs` takes.
+ */
+export function stepTree(steps: Step[], label: Map<string, string>, paint = true): string[] {
+  const rows: { name: string; dur: string; job: string; where: string; skipped?: boolean }[] = [];
+  const seen = new Set<string | null>();
+  for (const s of steps) {
+    const mark = MARK[s.status];
+    if (!mark) {
+      continue;
+    }
+    const path = (label.get(s.job) ?? s.step).split(SEP);
+    const depth = path.length - 1;
+    if (depth > 0 && !seen.has(s.parent)) {
+      seen.add(s.parent);
+      rows.push({
+        name: "  ".repeat(depth) + path[depth - 1],
+        dur: "",
+        job: s.parent ?? "",
+        where: "",
+      });
+    }
+    const [ch, color] = mark;
+    const skipped = s.status === "skipped";
+    const w = where(s);
+    rows.push({
+      name: "  ".repeat(depth + 1) + (paint ? color(ch) : ch) + " " + path[depth] +
+        (s.attempt > 1 ? ` (attempt ${s.attempt})` : ""),
+      dur: skipped ? "skipped" : s.ended === undefined ? "" : duration(s.ended - s.started),
+      job: s.job,
+      where: w && !skipped ? `on ${w}` : "",
+      skipped,
+    });
+  }
+  const nameW = Math.max(0, ...rows.map((r) => columns(r.name)));
+  const durW = Math.max(0, ...rows.map((r) => r.dur.length));
+  const dim = paint ? colors.dim : (t: string) => t;
+  return rows.map((r) => {
+    const line = (r.name + " ".repeat(nameW - columns(r.name)) + "  " + r.dur.padStart(durW) +
+      "  " + r.job + (r.where ? "  " + dim(r.where) : "")).trimEnd();
+    return r.skipped ? dim(line) : line;
+  });
+}
+
 /**
  * Follow a flow run in the terminal. Undefined, with nothing printed, when the
  * server has no live channel, so the caller can fall back to the step walker.
@@ -652,6 +705,12 @@ export async function viewFlowRun(
   const finalCount = `  ${slots.filter((s) => s.status !== "pending").length}/${slots.length}`;
   const finalWidth = Math.max(10, (out.columns || 100) - 1) - finalCount.length;
   out.write(`${slotBar(slots, true, opts.interactive ? finalWidth : Infinity)}${finalCount}\n`);
+  // Step lines were already printed as each step ended when not interactive.
+  if (opts.interactive) {
+    for (const line of stepTree([...run.steps.values()], label)) {
+      out.write(line + "\n");
+    }
+  }
   for (const s of failed) {
     const w = where(s);
     out.write(

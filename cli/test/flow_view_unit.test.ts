@@ -6,6 +6,7 @@ import {
   planSlots,
   slotBar,
   slotFor,
+  stepTree,
   windowLines,
 } from "../src/utils/flow_view.ts";
 
@@ -118,4 +119,33 @@ test("the slot bar fits a width: dividers go first, then slots share cells", () 
   expect(slotBar(slots, false)).toBe("█│▓·│█");
   expect(slotBar(slots, false, 4)).toBe("█▓·█");
   expect(slotBar(slots, false, 2)).toBe("▓█");
+});
+
+test("the step tree names each step, skipped ones too, by its job id", () => {
+  const run = new FlowRun("root");
+  const at = (job: string, parent: string, step: string, kind = "script") =>
+    run.start({ type: "start", job, parent, root: "root", step, kind, worker: "wk-1", hostname: "host" }, 0);
+  at("r1", "root", "resolve");
+  at("k1", "kflow", "fetch");
+  at("k2", "kflow", "configure", "identity");
+  at("k3", "kflow", "compile");
+  run.end("r1", true, 75);
+  run.end("k1", false, 1000);
+  at("k4", "kflow", "fetch");
+  for (const j of ["k2", "k3", "k4"]) run.end(j, true, 2000);
+  const label = new Map([
+    ["r1", "resolve"],
+    ["k1", "build_kernel › fetch"],
+    ["k2", "build_kernel › configure"],
+    ["k3", "build_kernel › compile"],
+    ["k4", "build_kernel › fetch"],
+  ]);
+  expect(stepTree([...run.steps.values()], label, false)).toEqual([
+    "  ✓ resolve                 0.1s  r1  on wk-1 @ host",
+    "  build_kernel                    kflow",
+    "    ▓ fetch                 1.0s  k1  on wk-1 @ host",
+    "    ⊘ configure          skipped  k2",
+    "    ✓ compile               2.0s  k3  on wk-1 @ host",
+    "    ✓ fetch (attempt 2)     2.0s  k4  on wk-1 @ host",
+  ]);
 });
